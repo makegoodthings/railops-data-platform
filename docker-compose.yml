@@ -19,10 +19,15 @@ services:
     build: .
     env_file:
       - .env
+    environment:
+      PYTHONPATH: /app/src
     depends_on:
       source-db:
         condition: service_healthy
     volumes:
+      - ./src:/app/src
+      - ./tests:/app/tests
+      - ./airflow:/app/airflow
       - ./data:/app/data
 
   airflow:
