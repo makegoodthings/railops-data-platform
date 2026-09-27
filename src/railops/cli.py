@@ -6,6 +6,7 @@ import duckdb
 import typer
 
 from railops.config import get_settings
+from railops.ingestion import extract_source_events, read_watermark
 from railops.source import initialize_source, seed_source
 
 app = typer.Typer(no_args_is_help=True)
@@ -47,6 +48,44 @@ def init() -> None:
             )
             """
         )
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS meta.pipeline_runs (
+                run_id VARCHAR PRIMARY KEY,
+                pipeline_name VARCHAR NOT NULL,
+                started_at TIMESTAMPTZ NOT NULL,
+                ended_at TIMESTAMPTZ,
+                status VARCHAR NOT NULL
+                    CHECK (status IN ('RUNNING', 'SUCCESS', 'FAILED')),
+
+                start_watermark_ts TIMESTAMPTZ NOT NULL,
+                start_watermark_id BIGINT NOT NULL,
+                end_watermark_ts TIMESTAMPTZ,
+                end_watermark_id BIGINT,
+
+                rows_extracted BIGINT NOT NULL DEFAULT 0,
+                error_message VARCHAR
+            )
+            """
+        )
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bronze.train_events_raw (
+                event_id BIGINT PRIMARY KEY,
+                train_id VARCHAR NOT NULL,
+                station_code VARCHAR,
+                event_type VARCHAR,
+                scheduled_ts TIMESTAMPTZ,
+                event_ts TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL,
+
+                _ingested_at TIMESTAMPTZ NOT NULL,
+                _batch_id VARCHAR NOT NULL,
+                _source_system VARCHAR NOT NULL
+            )
+            """
+        )
     typer.echo("Warehouse schemas and initial watermark created.")
 
 
@@ -59,6 +98,34 @@ def seed(rows: int = typer.Option(100, min=1)) -> None:
     typer.echo(
         f"Inserted {inserted_rows} synthetic train events into PostgreSQL."
     )
+
+
+@app.command()
+def preview_extract(batch_size: int = typer.Option(1000, min=1)) -> None:
+    """Read-only preview of the next incremental extraction window.
+
+    Does not write to Bronze and does not advance the watermark.
+    """
+    settings = get_settings()
+    if not Path(settings.warehouse_path).exists():
+        raise typer.BadParameter("Warehouse does not exist. Run `init` first.")
+    with _warehouse() as con:
+        watermark = read_watermark(con)
+    events = extract_source_events(watermark, batch_size=batch_size)
+
+    def cursor(row: dict) -> dict:
+        return {"updated_at": row["updated_at"], "event_id": row["event_id"]}
+
+    payload = {
+        "starting_watermark": {
+            "updated_at": watermark.updated_at,
+            "event_id": watermark.event_id,
+        },
+        "rows_extracted": len(events),
+        "first_cursor": cursor(events[0]) if events else None,
+        "last_cursor": cursor(events[-1]) if events else None,
+    }
+    typer.echo(json.dumps(payload, default=str, indent=2))
 
 
 @app.command()
