@@ -1,4 +1,5 @@
 import json
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -6,8 +7,17 @@ import duckdb
 import typer
 
 from railops.config import get_settings
-from railops.ingestion import extract_source_events, read_watermark
+from railops.ingestion import (
+    advance_watermark,
+    complete_pipeline_run,
+    extract_source_events,
+    fail_pipeline_run,
+    merge_source_events,
+    read_watermark,
+    start_pipeline_run,
+)
 from railops.source import initialize_source, seed_source
+from railops.watermark import Watermark
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -129,9 +139,57 @@ def preview_extract(batch_size: int = typer.Option(1000, min=1)) -> None:
 
 
 @app.command()
-def run() -> None:
-    """Placeholder for Milestones 2–5: execute the full batch pipeline."""
-    typer.echo("Pipeline implementation begins in Milestone 2.")
+def run(batch_size: int = typer.Option(50, min=1, max=10000)) -> None:
+    """Ingest one incremental batch from PostgreSQL into Bronze."""
+    settings = get_settings()
+    if not Path(settings.warehouse_path).exists():
+        raise typer.BadParameter("Warehouse does not exist. Run `init` first.")
+
+    run_id = str(uuid.uuid4())
+    with _warehouse() as con:
+        start_wm = read_watermark(con)
+        start_pipeline_run(con, run_id, start_wm)
+
+        in_transaction = False
+        try:
+            events = extract_source_events(start_wm, batch_size=batch_size)
+            if events:
+                end_wm = Watermark(
+                    updated_at=events[-1]["updated_at"],
+                    event_id=events[-1]["event_id"],
+                )
+            else:
+                end_wm = start_wm
+
+            con.execute("BEGIN TRANSACTION")
+            in_transaction = True
+            inserted, updated = merge_source_events(con, events, run_id)
+            advance_watermark(con, end_wm)
+            complete_pipeline_run(con, run_id, end_wm, len(events))
+            con.execute("COMMIT")
+            in_transaction = False
+        except Exception as exc:
+            if in_transaction:
+                con.execute("ROLLBACK")
+            fail_pipeline_run(con, run_id, str(exc))
+            raise
+
+    payload = {
+        "run_id": run_id,
+        "status": "SUCCESS",
+        "rows_extracted": len(events),
+        "rows_inserted": inserted,
+        "rows_updated": updated,
+        "start_watermark": {
+            "updated_at": start_wm.updated_at,
+            "event_id": start_wm.event_id,
+        },
+        "end_watermark": {
+            "updated_at": end_wm.updated_at,
+            "event_id": end_wm.event_id,
+        },
+    }
+    typer.echo(json.dumps(payload, default=str, indent=2))
 
 
 @app.command()
