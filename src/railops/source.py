@@ -5,7 +5,6 @@ import psycopg
 
 from railops.config import get_settings
 
-
 SOURCE_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS public.train_events (
     event_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

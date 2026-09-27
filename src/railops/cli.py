@@ -1,12 +1,12 @@
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from railops.source import initialize_source, seed_source
 
 import duckdb
 import typer
 
 from railops.config import get_settings
+from railops.source import initialize_source, seed_source
 
 app = typer.Typer(no_args_is_help=True)
 
